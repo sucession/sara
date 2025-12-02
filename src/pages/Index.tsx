@@ -1,6 +1,6 @@
-import { Button } from "@mantine/core";
+import { Alert, Button, Group } from "@mantine/core";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { IconBrandGithub } from "@tabler/icons-react";
+import { IconAlertTriangle, IconBrandGithub, IconPlayerPlay } from "@tabler/icons-react";
 import { useState } from "react";
 
 import { Journey } from "@components/Journey";
@@ -10,16 +10,20 @@ import { Footer } from "@components/common/Footer";
 import { Header } from "@components/common/Header";
 import { Section } from "@components/common/Section";
 
-import { Address } from "@typing/index";
+import { RecoveredStealthSafeRow } from "@typing/index";
 
 export const Index = () => {
   const [activeStep, setActiveStep] = useState<number>(0);
-  const [stealthAddressData, setStealthAddressData] = useState<string[][]>([]);
+  const [stealthRows, setStealthRows] = useState<RecoveredStealthSafeRow[]>([]);
   const deployedGitCommit = __APP_COMMIT__ || 'main';
 
   const GITHUB_URL = `https://github.com/shahnami/sara`;
+  const TUTORIAL_URL = `https://www.youtube.com/watch?v=HWy6-jXqemg`;
   const handleGithubRedirect = () => {
     open(GITHUB_URL, "_blank");
+  };
+  const handleTutorialRedirect = () => {
+    open(TUTORIAL_URL, "_blank");
   };
 
   return (
@@ -32,38 +36,29 @@ export const Index = () => {
         <Card>
           <Journey
             onStepChanged={(step: number) => setActiveStep(step)}
-            onStealthDataProcessed={(data: string[][]) =>
-              setStealthAddressData(data)
-            }
+            onStealthDataProcessed={(data) => setStealthRows(data.rows)}
           />
         </Card>
         <Card hidden={activeStep < 3}>
-          <StealthAddressStickyTable
-            items={stealthAddressData.slice(1).map((v) => {
-              return {
-                nonce: v[0],
-                stealthSafeAddress: v[1] as Address,
-                stealthSignerAddress: v[2] as Address,
-                stealthSignerKey: v[3] as Address,
-                balances: {
-                  ETH: v[4],
-                  USDT: v[5],
-                  USDC: v[6],
-                  DAI: v[7],
-                },
-                status: v[8],
-              };
-            })}
-          />
+          <StealthAddressStickyTable items={stealthRows} />
         </Card>
+        <Alert
+          icon={<IconAlertTriangle size={16} />}
+          color="yellow"
+          variant="light"
+          style={{ marginTop: "var(--u3)" }}
+        >
+          Moving funds out of a stealth address without using the Fluidkey UI may
+          lead to loss of functionality within the Fluidkey UI. Only use this
+          interface to verify addresses or as a last resort to recover funds.
+        </Alert>
       </Section>
       <Footer>
         <p>
-          Learn more about the mission, values, and the team behind{" "}
+          Learn more about{" "}
           <a href="https://fluidkey.com" target="_blank">
             Fluidkey
           </a>
-          .
         </p>
         <p>
           <i>Latest deployed commit</i>:{" "}
@@ -71,7 +66,14 @@ export const Index = () => {
             {deployedGitCommit?.substring(0, 7)}
           </a>
         </p>
-        <p>
+        <Group gap="sm">
+          <Button
+            color="#191919"
+            onClick={handleTutorialRedirect}
+            leftSection={<IconPlayerPlay />}
+          >
+            Watch Tutorial
+          </Button>
           <Button
             color="#191919"
             onClick={handleGithubRedirect}
@@ -79,7 +81,7 @@ export const Index = () => {
           >
             GitHub
           </Button>
-        </p>
+        </Group>
       </Footer>
     </>
   );

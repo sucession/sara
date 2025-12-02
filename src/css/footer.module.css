@@ -3,7 +3,10 @@
   border-top: 1px solid var(--light-gray);
   bottom: 0;
   display: flex;
-  height: 75px;
+  min-height: fit-content;
+  padding: var(--u3) 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .footer .container {
@@ -12,4 +15,11 @@
   justify-content: space-between;
   align-items: center;
   width: 100%;
+  flex-wrap: wrap;
+  gap: var(--u2);
+}
+
+.footer p {
+  margin: 0;
+  flex-shrink: 0;
 }

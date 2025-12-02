@@ -11,21 +11,29 @@ import {
   Grid,
   NumberInput,
   Progress,
+  Select,
   Switch,
   TextInput,
 } from "@mantine/core";
 import { IconArrowLeft, IconList } from "@tabler/icons-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { StepContent } from "@components/StepContent";
 import { CopyWithCheckButton } from "@components/common/CopyButton";
 
 import {
+  AUTO_EARN_PROFILES,
+  AutoEarnProfileId,
+} from "@configs/autoEarnProfiles";
+import {
   FluidKeyMetaStealthKeyPair,
   FluidKeyStealthSafeAddressGenerationParams,
+  RecoveredStealthSafeRow,
+  StealthResults,
   SupportedChainId,
 } from "@typing/index";
+import { detectRpcChainId } from "@utils/detectRpcChain";
 import { normalizeForRange, truncateEthAddress } from "@utils/index";
 
 import {
@@ -38,9 +46,12 @@ import {
 interface ComponentProps {
   activeChainId: number;
   keys: FluidKeyMetaStealthKeyPair | undefined;
-  onStealthDataProcessed: (data: string[][]) => void;
+  onStealthDataProcessed: (data: StealthResults) => void;
   onBack: () => void;
 }
+
+const CUSTOM_PROFILE_ID = "custom" as const;
+type ProfileSelectValue = AutoEarnProfileId | typeof CUSTOM_PROFILE_ID;
 
 export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
   const [openSettings, setOpenSettings] = useState(false);
@@ -55,22 +66,99 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
       safeVersion: "1.3.0",
       useDefaultAddress: true,
       exportPrivateKeys: true,
+      customTransport: undefined,
+      tokenBalanceAddress: undefined,
+      initializerTo: undefined,
+      initializerData: undefined,
     });
-  const [stealthAddressData, setStealthAddressData] = useState<string[][]>([
-    defaultExportHeaders,
-  ]);
+  const [stealthResults, setStealthResults] = useState<StealthResults>({
+    csv: [defaultExportHeaders],
+    rows: [],
+  });
 
   const handleSettingsChange = (
     setting: keyof FluidKeyStealthSafeAddressGenerationParams,
-    value: string | number | boolean
+    value: string | number | boolean | undefined
   ) => {
-    setSettings((prev) => ({ ...prev, [setting]: value }));
+    let normalizedValue = value;
+    const shouldTrim =
+      setting === "initializerTo" ||
+      setting === "initializerData" ||
+      setting === "customTransport" ||
+      setting === "tokenBalanceAddress";
+
+    if (shouldTrim && typeof value === "string") {
+      const trimmedValue = value.trim();
+      normalizedValue = trimmedValue.length > 0 ? trimmedValue : undefined;
+    }
+
+    setSettings((prev) => ({ ...prev, [setting]: normalizedValue }));
+  };
+
+  const matchedProfile = useMemo(() => {
+    return AUTO_EARN_PROFILES.find(
+      (profile) =>
+        profile.initializerTo === settings.initializerTo &&
+        profile.initializerData === settings.initializerData
+    );
+  }, [settings.initializerData, settings.initializerTo]);
+
+  const selectedProfileId: ProfileSelectValue = useMemo(() => {
+    if (matchedProfile) {
+      return matchedProfile.id;
+    }
+    if (!settings.initializerTo && !settings.initializerData) {
+      return "manual";
+    }
+    return CUSTOM_PROFILE_ID;
+  }, [matchedProfile, settings.initializerData, settings.initializerTo]);
+
+  const profileOptions = useMemo(
+    () => [
+      ...AUTO_EARN_PROFILES.map((profile) => ({
+        value: profile.id,
+        label: profile.label,
+      })),
+    ],
+    []
+  );
+
+  const handleProfileSelect = (value: string | null) => {
+    if (!value) {
+      return;
+    }
+
+    if (value === CUSTOM_PROFILE_ID) {
+      // Keep whatever custom values are present.
+      return;
+    }
+
+    const selectedProfile = AUTO_EARN_PROFILES.find(
+      (profile) => profile.id === value
+    );
+
+    if (!selectedProfile) {
+      return;
+    }
+
+    setSettings((prev) => ({
+      ...prev,
+      initializerTo: selectedProfile.initializerTo,
+      initializerData: selectedProfile.initializerData,
+    }));
   };
 
   const recoverStealthAccounts = async () => {
-    setStealthAddressData([defaultExportHeaders]);
+    setStealthResults({ csv: [defaultExportHeaders], rows: [] });
     if (props.keys?.viewingPrivateKey && props.keys?.spendingPrivateKey) {
       setIsLoading(true);
+
+      const customTransport = settings.customTransport?.trim();
+      let balanceChainId: SupportedChainId | undefined;
+
+      if (customTransport) {
+        balanceChainId = await detectRpcChainId(customTransport);
+      }
 
       const derivedBIP32Node = extractViewingPrivateKeyNode(
         props.keys.viewingPrivateKey,
@@ -83,6 +171,10 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
       const spendingPublicKey = spendingAccount.publicKey;
 
       const promises: Promise<string[]>[] = [];
+      const pendingRows: Omit<
+        RecoveredStealthSafeRow,
+        "stealthSafeAddress" | "stealthSignerAddress" | "stealthSignerKey" | "balances"
+      >[] = [];
       let counter = 0;
       for (let i = settings.startNonce; i < settings.endNonce; i++) {
         const { ephemeralPrivateKey } = generateEphemeralPrivateKey({
@@ -101,12 +193,31 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
           stealthAddresses: stealthAddresses as `0x${string}`[],
           settings: settings,
           activeChainId: props.activeChainId as SupportedChainId,
+          balanceChainId,
           meta: {
             ephemeralPrivateKey: ephemeralPrivateKey,
             spendingPrivateKey: props.keys.spendingPrivateKey,
             spendingPublicKey: spendingPublicKey,
           },
         };
+
+        const resolvedChainId =
+          settings.chainId > 0
+            ? (settings.chainId as SupportedChainId)
+            : (props.activeChainId as SupportedChainId);
+
+        pendingRows.push({
+          nonce: i,
+          stealthAddresses: stealthAddresses as `0x${string}`[],
+          chainId: settings.chainId,
+          deploymentChainId: resolvedChainId,
+          safeVersion: settings.safeVersion,
+          useDefaultAddress: settings.useDefaultAddress,
+          initializerTo: settings.initializerTo,
+          initializerData: settings.initializerData,
+          threshold: 1,
+          balanceChainId,
+        });
 
         const updateProgress = () => {
           setProgress(
@@ -120,16 +231,61 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
           );
         };
         promises.push(
-          settings.customTransport
-            ? scheduleRequest<string[]>(createCSVEntry.bind(null, params, updateProgress))
+          customTransport
+            ? scheduleRequest<string[]>(
+                createCSVEntry.bind(null, params, updateProgress)
+              )
             : createCSVEntry(params, updateProgress)
         );
       }
 
       const results = await Promise.all(promises);
-      setStealthAddressData((prev) => {
-        return [...prev, ...results];
+      const csv = [defaultExportHeaders, ...results];
+      const rows: RecoveredStealthSafeRow[] = results.map((result, index) => {
+        const meta = pendingRows[index];
+        const [
+          ,
+          safeAddress,
+          signerAddress,
+          signerKey,
+          nativeLabel,
+          nativeValue,
+          tokenLabel,
+          tokenValue,
+        ] = result;
+
+        const resolvedNativeBalance = {
+          label: nativeLabel ?? "Native Balance",
+          value: nativeValue ?? "-",
+        };
+
+        const hasTokenBalance =
+          (tokenLabel && tokenLabel !== "-") ||
+          (tokenValue && tokenValue !== "-");
+
+        const resolvedTokenBalance = hasTokenBalance
+          ? {
+              label:
+                tokenLabel && tokenLabel !== "-"
+                  ? tokenLabel
+                  : "Token Balance",
+              value: tokenValue ?? "-",
+            }
+          : undefined;
+
+        return {
+          ...meta,
+          stealthSafeAddress: safeAddress ?? "-",
+          stealthSignerAddress: signerAddress ?? "-",
+          stealthSignerKey: signerKey ?? "-",
+          balances: {
+            native: resolvedNativeBalance,
+            token: resolvedTokenBalance,
+          },
+        };
       });
+
+      setStealthResults({ csv, rows });
       setIsLoading(false);
     }
   };
@@ -150,10 +306,10 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
   }, [settings]);
 
   useEffect(() => {
-    if (stealthAddressData.length > 1) {
-      props.onStealthDataProcessed(stealthAddressData);
+    if (stealthResults.csv.length > 1) {
+      props.onStealthDataProcessed(stealthResults);
     }
-  }, [stealthAddressData]);
+  }, [stealthResults]);
 
   return (
     <>
@@ -161,6 +317,23 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
         Click on the button below to initiate the recovery of stealth addresses.
         Feel free to customize additional settings as needed for a personalized
         experience.
+        <Box
+          style={{
+            marginTop: "var(--u2)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--u2)",
+            width: "100%",
+          }}
+        >
+          <Select
+            label="Auto-earn profile"
+            placeholder="Select a profile"
+            data={profileOptions}
+            value={selectedProfileId}
+            onChange={handleProfileSelect}
+          />
+        </Box>
         <Box
           style={{
             display: "flex",
@@ -293,8 +466,17 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
                 <TextInput
                   label="Check balances onchain"
                   placeholder="https://rpc.example.com"
+                  value={settings.customTransport ?? ""}
                   onChange={(v) =>
                     handleSettingsChange("customTransport", v.target.value)
+                  }
+                />
+                <TextInput
+                  label="Token balance address"
+                  placeholder="0x..."
+                  value={settings.tokenBalanceAddress ?? ""}
+                  onChange={(v) =>
+                    handleSettingsChange("tokenBalanceAddress", v.target.value)
                   }
                 />
                 <TextInput
@@ -367,6 +549,7 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
               <TextInput
                 label="Initializer to address"
                 placeholder="0x..."
+                value={settings.initializerTo ?? ""}
                 onChange={(v) =>
                   handleSettingsChange("initializerTo", v.target.value)
                 }
@@ -374,6 +557,7 @@ export const RecoverAddressesJourneyStep = (props: ComponentProps) => {
               <TextInput
                 label="Initializer data"
                 placeholder="0x..."
+                value={settings.initializerData ?? ""}
                 onChange={(v) =>
                   handleSettingsChange("initializerData", v.target.value)
                 }
