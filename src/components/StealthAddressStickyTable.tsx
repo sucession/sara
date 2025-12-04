@@ -1,27 +1,79 @@
-import { Table } from "@mantine/core";
-import { Address } from "@typing/index";
+import { useEffect } from "react";
+import { Button, Table } from "@mantine/core";
+import { RecoveredStealthSafeRow, SupportedChainId } from "@typing/index";
 import { truncateEthAddress } from "@utils/index";
 import { CopyWithCheckButton } from "./common/CopyButton";
+import { useDeployStealthSafe } from "hooks/useDeployStealthSafe";
+import { useChainId } from "wagmi";
 
 interface ComponentProps {
-  items: {
-    nonce: string;
-    stealthSafeAddress: Address;
-    stealthSignerAddress: Address;
-    stealthSignerKey: Address;
-    balances: {
-      ETH: string;
-      USDT: string;
-      USDC: string;
-      DAI: string;
-    };
-    status: string;
-  }[];
+  items: RecoveredStealthSafeRow[];
 }
 
+const SAFE_CHAIN_PREFIX: Record<SupportedChainId, string> = {
+  1: "eth",
+  10: "oeth",
+  137: "matic",
+  42_161: "arb1",
+  8453: "base",
+  100: "gno",
+  11_155_111: "sep",
+};
+
+const buildSafeInterfaceUrl = (
+  row: RecoveredStealthSafeRow,
+  selectedChainId?: number
+) => {
+  let chainKey: SupportedChainId | undefined;
+
+  if (selectedChainId && SAFE_CHAIN_PREFIX[selectedChainId as SupportedChainId]) {
+    chainKey = selectedChainId as SupportedChainId;
+  } else if (SAFE_CHAIN_PREFIX[row.deploymentChainId]) {
+    chainKey = row.deploymentChainId;
+  }
+
+  const prefix = chainKey ? SAFE_CHAIN_PREFIX[chainKey] : undefined;
+  if (!prefix || !row.stealthSafeAddress.startsWith("0x")) {
+    return undefined;
+  }
+  return `https://eternalsafe.eth.limo/balances?safe=${prefix}:${row.stealthSafeAddress}`;
+};
+
 export const StealthAddressStickyTable = (props: ComponentProps) => {
-  const rows = props.items.map((item) => (
-    <Table.Tr key={item.nonce}>
+  const { deploy, error, isDeploying, pendingNonce } = useDeployStealthSafe();
+  const selectedChainId = useChainId();
+
+  useEffect(() => {
+    if (error) {
+      alert(error); // Lightweight feedback until a nicer UI is added.
+    }
+  }, [error]);
+
+  const showNativeBalanceColumn = props.items.some(
+    (item) => item.balances.native.value !== "-"
+  );
+  const showTokenBalanceColumn = props.items.some(
+    (item) => (item.balances.token?.value ?? "-") !== "-"
+  );
+  const shouldRenderBalanceColumns =
+    showNativeBalanceColumn || showTokenBalanceColumn;
+
+  const nativeHeaderLabel =
+    props.items.find((item) => item.balances.native.value !== "-")
+      ?.balances.native.label ??
+    props.items[0]?.balances.native.label ??
+    "Native Balance";
+
+  const tokenHeaderLabel =
+    props.items.find(
+      (item) => (item.balances.token?.value ?? "-") !== "-"
+    )?.balances.token?.label ?? "Token Balance";
+
+  const rows = props.items.map((item) => {
+    const safeInterfaceUrl = buildSafeInterfaceUrl(item, selectedChainId);
+
+    return (
+      <Table.Tr key={item.nonce}>
       <Table.Td>{item.nonce}</Table.Td>
       <Table.Td>
         <div
@@ -59,17 +111,59 @@ export const StealthAddressStickyTable = (props: ComponentProps) => {
           <CopyWithCheckButton value={item.stealthSignerKey} />
         </div>
       </Table.Td>
-      {props.items.length > 0 && Object.values(props.items[0].balances).some((balance) => balance !== "-") && (
+      {shouldRenderBalanceColumns && (
         <>
-          <Table.Td>{item.balances.ETH}</Table.Td>
-          <Table.Td>{item.balances.USDT}</Table.Td>
-          <Table.Td>{item.balances.USDC}</Table.Td>
-          <Table.Td>{item.balances.DAI}</Table.Td>
+          {showNativeBalanceColumn && (
+            <Table.Td>{item.balances.native.value}</Table.Td>
+          )}
+          {showTokenBalanceColumn && (
+            <Table.Td>{item.balances.token?.value ?? "-"}</Table.Td>
+          )}
         </>
       )}
-      <Table.Td>{item.status}</Table.Td>
-    </Table.Tr>
-  ));
+        <Table.Td>
+          <div
+            style={{
+              display: "flex",
+              gap: "var(--u1)",
+              flexWrap: "wrap",
+            }}
+          >
+            <Button
+              size="xs"
+              variant="default"
+              disabled={
+                !safeInterfaceUrl
+              }
+              onClick={() => {
+                if (!safeInterfaceUrl) {
+                  return;
+                }
+                window.open(safeInterfaceUrl, "_blank", "noopener,noreferrer");
+              }}
+            >
+              Safe interface
+            </Button>
+            <Button
+              size="xs"
+              variant="light"
+              disabled={
+                isDeploying ||
+                item.stealthSafeAddress === "-" ||
+                !item.stealthSafeAddress.startsWith("0x")
+              }
+              loading={pendingNonce === item.nonce && isDeploying}
+              onClick={() => {
+                void deploy(item).catch(() => undefined);
+              }}
+            >
+              Deploy
+            </Button>
+          </div>
+        </Table.Td>
+      </Table.Tr>
+    );
+  });
 
   return (
     <Table.ScrollContainer
@@ -89,17 +183,17 @@ export const StealthAddressStickyTable = (props: ComponentProps) => {
             <Table.Th>Safe Address</Table.Th>
             <Table.Th>Signer Address</Table.Th>
             <Table.Th>Signer Key</Table.Th>
-            {props.items.length > 0 && Object.values(props.items[0].balances).some(
-              (balance) => balance !== "-"
-            ) && (
+            {shouldRenderBalanceColumns && (
               <>
-                <Table.Th>ETH</Table.Th>
-                <Table.Th>USDC</Table.Th>
-                <Table.Th>USDT</Table.Th>
-                <Table.Th>DAI</Table.Th>
+                {showNativeBalanceColumn && (
+                  <Table.Th>{nativeHeaderLabel}</Table.Th>
+                )}
+                {showTokenBalanceColumn && (
+                  <Table.Th>{tokenHeaderLabel}</Table.Th>
+                )}
               </>
             )}
-            <Table.Th>Status</Table.Th>
+            <Table.Th>Actions</Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>{rows}</Table.Tbody>

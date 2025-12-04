@@ -1,10 +1,11 @@
 import { predictStealthSafeAddressWithBytecode } from "@fluidkey/stealth-account-kit";
-import { GetBalanceReturnType, getBalance } from "@wagmi/core";
+import { getBalance } from "@wagmi/core";
 import { isEmpty } from "lodash";
-import { formatUnits } from "viem";
+import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
 
 // Config
-import { TokenDeployments, getConfig } from "@configs/rainbow.config";
+import { getConfig } from "@configs/rainbow.config";
+import { detectRpcChainId } from "@utils/detectRpcChain";
 import {
   SAFE_PROXY_BYTECODE,
   SupportedChainIds,
@@ -21,8 +22,8 @@ import {
   SupportedChainId,
 } from "@typing/index";
 
-const balanceOrder = ["ETH", "USDT", "USDC", "DAI"];
-const chainNativeCurrencies = ["SEP"]; // Add any native currencies here that will be represented as ETH
+const DEFAULT_NATIVE_LABEL = "Native Balance";
+const DEFAULT_TOKEN_LABEL = "Token Balance";
 
 const limiter = new Bottleneck({
   minTime: 200, // minimum time (in ms) between requests
@@ -35,79 +36,145 @@ export const scheduleRequest = <T>(call: () => Promise<T>) => {
   });
 };
 
-const convertToNativeCurrency = (symbol: string) => {
-  return chainNativeCurrencies.includes(symbol) ? "ETH" : symbol;
+const formatBalanceValue = (value: bigint, decimals: number) => {
+  try {
+    return formatUnits(value, decimals);
+  } catch {
+    return "-";
+  }
 };
 
-const fillRejectedBalances = (
-  settledBalances: { value: string; symbol: string }[]
-) => {
-  const missingSymbols = balanceOrder.filter(
-    (symbol) =>
-      !settledBalances
-        .map((balance) => balance.symbol)
-        .map(convertToNativeCurrency)
-        .includes(symbol)
-  );
-  return settledBalances
-    .concat(
-      missingSymbols.map((symbol) => {
-        return { value: "-", symbol };
-      })
-    )
-    .sort((a, b) => {
-      return balanceOrder.indexOf(a.symbol) - balanceOrder.indexOf(b.symbol);
-    })
-    .map((balance) => `${balance.value}`);
+const createEmptyBalances = (includeToken: boolean) => {
+  return {
+    native: { label: DEFAULT_NATIVE_LABEL, value: "-" },
+    token: includeToken ? { label: DEFAULT_TOKEN_LABEL, value: "-" } : undefined,
+  };
 };
 
-const filterSettledBalances = (
-  balances: PromiseSettledResult<GetBalanceReturnType>[]
+const buildFallbackChain = (chainId: SupportedChainId, rpcUrl: string) => ({
+  id: chainId,
+  name: `Chain ${chainId}`,
+  network: `chain-${chainId}`,
+  nativeCurrency: {
+    name: "Native",
+    symbol: "Native",
+    decimals: 18,
+  },
+  rpcUrls: {
+    default: { http: [rpcUrl] },
+    public: { http: [rpcUrl] },
+  },
+});
+
+const fetchTokenMetadata = async (
+  client: ReturnType<typeof createPublicClient>,
+  tokenAddress: Address
 ) => {
-  return balances
-    .filter((balance) => balance.status === "fulfilled")
-    .map(
-      (balance) =>
-        (balance as PromiseFulfilledResult<GetBalanceReturnType>).value
-    )
-    .sort((a, b) => {
-      return balanceOrder.indexOf(a.symbol) - balanceOrder.indexOf(b.symbol);
+  const decimals = (await client
+    .readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "decimals",
     })
-    .map((balance) => {
-      return {
-        value: formatUnits(balance.value, balance.decimals),
-        symbol: balance.symbol,
+    .catch(() => 18)) as number;
+
+  const symbol = (await client
+    .readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "symbol",
+    })
+    .catch(() => DEFAULT_TOKEN_LABEL)) as string;
+
+  return { decimals, symbol };
+};
+
+const fetchTokenBalance = async ({
+  address,
+  chainId,
+  rpcUrl,
+  tokenAddress,
+}: {
+  address: Address;
+  chainId: SupportedChainId;
+  rpcUrl: string;
+  tokenAddress: Address;
+}) => {
+  const client = createPublicClient({
+    chain: buildFallbackChain(chainId, rpcUrl),
+    transport: http(rpcUrl),
+  });
+
+  const [rawBalance, metadata] = await Promise.all([
+    client.readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [address],
+    }) as Promise<bigint>,
+    fetchTokenMetadata(client, tokenAddress),
+  ]);
+
+  return {
+    value: rawBalance,
+    decimals: metadata.decimals,
+    symbol: metadata.symbol,
+  };
+};
+
+const getBalances = async ({
+  address,
+  chainId,
+  rpcUrl,
+  tokenAddress,
+}: {
+  address: Address;
+  chainId: SupportedChainId;
+  rpcUrl: string;
+  tokenAddress?: Address;
+}) => {
+  const includeToken = Boolean(tokenAddress);
+  const balances = createEmptyBalances(includeToken);
+  if (includeToken && tokenAddress) {
+    try {
+      const tokenData = await fetchTokenBalance({
+        address,
+        chainId,
+        rpcUrl,
+        tokenAddress,
+      });
+      balances.token = {
+        label: tokenData.symbol ?? DEFAULT_TOKEN_LABEL,
+        value: formatBalanceValue(tokenData.value, tokenData.decimals ?? 18),
       };
+      return {
+        values: balances,
+      };
+    } catch (err) {
+      return {
+        values: balances,
+      };
+    }
+  }
+
+  try {
+    const config = getConfig(rpcUrl, { chainId });
+    const native = await getBalance(config, {
+      address,
+      chainId,
     });
-};
-
-const getBalances = async (address: Address, chainId: SupportedChainId, customTransport?: string) => {
-  const config = getConfig(customTransport);
-
-  const ETHBalance = getBalance(config, {
-    address: address,
-    chainId: chainId,
-  });
-
-  const USDCBalance = getBalance(config, {
-    address: address,
-    token: TokenDeployments[chainId].USDC,
-    chainId: chainId,
-  });
-
-  const USDTBalance = getBalance(config, {
-    address: address,
-    token: TokenDeployments[chainId].USDT,
-    chainId: chainId,
-  });
-
-  const DAIBalance = getBalance(config, {
-    address: address,
-    token: TokenDeployments[chainId].DAI,
-    chainId: chainId,
-  });
-
-  return Promise.allSettled([ETHBalance, USDCBalance, USDTBalance, DAIBalance]);
+    balances.native = {
+      label: native.symbol ?? DEFAULT_NATIVE_LABEL,
+      value: formatBalanceValue(native.value, native.decimals),
+    };
+    return {
+      values: balances,
+    };
+  } catch (err) {
+    return {
+      values: balances,
+    };
+  }
 };
 
 export const createCSVEntry = async (
@@ -122,26 +189,42 @@ export const createCSVEntry = async (
       stealthAddresses: params.stealthAddresses,
       useDefaultAddress: params.settings.useDefaultAddress,
       safeVersion: params.settings.safeVersion,
-      initializerExtraFields: {
-        to: params.settings.initializerTo,
-        data: params.settings.initializerData,
-      },
+      initializerExtraFields:
+        params.settings.initializerTo && params.settings.initializerData
+          ? {
+              to: params.settings.initializerTo,
+              data: params.settings.initializerData,
+            }
+          : undefined,
     });
 
-    let filledBalances = ["-", "-", "-", "-"];
-    let status = "Success";
+    const primaryStealthAddress =
+      params.stealthAddresses[0] ?? ("-" as Address);
 
-    if (params.settings.customTransport) {
-      const balances = await getBalances(
-        stealthSafeAddress,
-        params.settings.chainId > 0
-          ? (params.settings.chainId as SupportedChainId)
-          : params.activeChainId,
-        params.settings.customTransport
-      );
-      const settledBalances = filterSettledBalances(balances);
-      filledBalances = fillRejectedBalances(settledBalances);
-      status = settledBalances.length < balances.length ? "Partial Success" : "Success";
+    const tokenAddress = params.settings
+      .tokenBalanceAddress as Address | undefined;
+    let resolvedBalances = createEmptyBalances(Boolean(tokenAddress));
+
+    const trimmedTransport = params.settings.customTransport?.trim();
+
+    let balanceChainId = params.balanceChainId;
+
+    if (trimmedTransport && !balanceChainId) {
+      balanceChainId = await detectRpcChainId(trimmedTransport);
+    }
+
+    if (trimmedTransport && balanceChainId) {
+      try {
+        const balances = await getBalances({
+          address: stealthSafeAddress,
+          chainId: balanceChainId,
+          rpcUrl: trimmedTransport,
+          tokenAddress,
+        });
+        resolvedBalances = balances.values;
+      } catch (err) {
+      }
+    } else if (trimmedTransport && !balanceChainId) {
     }
 
     callback();
@@ -149,12 +232,14 @@ export const createCSVEntry = async (
     return [
       params.nonce.toString(),
       stealthSafeAddress,
-      ...params.stealthAddresses,
+      primaryStealthAddress,
       params.settings.exportPrivateKeys
         ? getPrivateKeyForSigner({ ...params.meta })
         : "-",
-      ...filledBalances,
-      status,
+      resolvedBalances.native.label,
+      resolvedBalances.native.value,
+      resolvedBalances.token?.label ?? "-",
+      resolvedBalances.token?.value ?? "-",
     ];
   } catch (e) {
     return [
@@ -162,11 +247,10 @@ export const createCSVEntry = async (
       "-",
       "-",
       "-",
+      DEFAULT_NATIVE_LABEL,
       "-",
+      DEFAULT_TOKEN_LABEL,
       "-",
-      "-",
-      "-",
-      `Failed: ${(e as Error).message}`,
     ];
   }
 };
@@ -176,11 +260,10 @@ export const defaultExportHeaders = [
   "Safe Address",
   "Signer Address",
   "Signer Private Key",
-  "ETH Balance",
-  "USDT Balance",
-  "USDC Balance",
-  "DAI Balance",
-  "Status",
+  "Native Balance Label",
+  "Native Balance",
+  "Token Balance Label",
+  "Token Balance",
 ];
 
 export const validateSettings = (

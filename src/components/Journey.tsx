@@ -10,20 +10,23 @@ import { GenerateKeysJourneyStep } from "@components/GenerateKeysJourneyStep";
 import { RecoverAddressesJourneyStep } from "@components/RecoverAddressesJourneyStep";
 
 import { downloadCSV } from "@utils/index";
-import { FluidKeyMetaStealthKeyPair } from "@typing/index";
+import { FluidKeyMetaStealthKeyPair, StealthResults } from "@typing/index";
 
 import { defaultExportHeaders } from "./Journey.model";
 
 interface ComponentProps {
   onStepChanged: (step: number) => void;
-  onStealthDataProcessed: (data: string[][]) => void;
+  onStealthDataProcessed: (data: StealthResults) => void;
 }
 
 export const Journey = (props: ComponentProps) => {
   const [keys, setKeys] = useState<FluidKeyMetaStealthKeyPair>();
-  const [stealthAddressData, setStealthAddressData] = useState<string[][]>([
-    defaultExportHeaders,
-  ]);
+  const initialStealthResults: StealthResults = {
+    csv: [defaultExportHeaders],
+    rows: [],
+  };
+  const [stealthResults, setStealthResults] =
+    useState<StealthResults>(initialStealthResults);
 
   const { isConnected } = useAccount();
   const { disconnect } = useDisconnect();
@@ -34,7 +37,7 @@ export const Journey = (props: ComponentProps) => {
       props.onStepChanged(0);
       return 0;
     }
-    if (stealthAddressData.length > 1) {
+    if (stealthResults.csv.length > 1) {
       props.onStepChanged(3);
       return 3;
     }
@@ -47,10 +50,10 @@ export const Journey = (props: ComponentProps) => {
   };
 
   useEffect(() => {
-    if (stealthAddressData.length > 1) {
-      props.onStealthDataProcessed(stealthAddressData);
+    if (stealthResults.csv.length > 1) {
+      props.onStealthDataProcessed(stealthResults);
     }
-  }, [stealthAddressData]);
+  }, [stealthResults]);
 
   return (
     <Stepper active={determineActiveStep()} allowNextStepsSelect={false}>
@@ -76,7 +79,7 @@ export const Journey = (props: ComponentProps) => {
         <RecoverAddressesJourneyStep
           activeChainId={currentChainId}
           keys={keys}
-          onStealthDataProcessed={(data) => setStealthAddressData(data)}
+          onStealthDataProcessed={(data) => setStealthResults(data)}
           onBack={() => setKeys(undefined)}
         />
       </Stepper.Step>
@@ -97,7 +100,12 @@ export const Journey = (props: ComponentProps) => {
             <Button
               variant="subtle"
               leftSection={<IconArrowLeft size={14} />}
-              onClick={() => setStealthAddressData([defaultExportHeaders])}
+              onClick={() =>
+                setStealthResults({
+                  csv: [defaultExportHeaders],
+                  rows: [],
+                })
+              }
             >
               Back
             </Button>
@@ -107,7 +115,7 @@ export const Journey = (props: ComponentProps) => {
               color="#191919"
               size="md"
               leftSection={<IconDownload size={14} />}
-              onClick={() => downloadCSV(currentChainId, stealthAddressData)}
+              onClick={() => downloadCSV(currentChainId, stealthResults.csv)}
             >
               Download Stealth Addresses
             </Button>
